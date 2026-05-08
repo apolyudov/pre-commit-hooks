@@ -219,6 +219,12 @@ You will need to remove
 the TODO comment and license so that it gets re-added in order to get rid
 of the error.
 
+Alternatively, you can use `--fuzzy-match-update` to automatically replace
+the fuzzy-matched license with the correct one instead of inserting a TODO
+comment. This uses the same fuzzy matching logic as
+`--fuzzy-match-generates-todo` but performs the replacement in-place.
+When both flags are specified, `--fuzzy-match-update` takes priority.
+
 License insertion can be skipped altogether if the file contains the
 `SKIP LICENSE INSERTION` in the first X top lines. This can also be
 overridden by `--skip-license-insertion-comment=<COMMENT>` flag.

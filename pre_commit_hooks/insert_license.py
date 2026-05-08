@@ -131,6 +131,14 @@ def main(argv=None) -> int:
             "E.g.: --extra-comments='before:Auto-generated,after:Do not edit'"
         ),
     )
+    parser.add_argument(
+        "--fuzzy-match-update",
+        action="store_true",
+        help=(
+            "When a fuzzy license match is found, replace the fuzzy-matched block "
+            "with the correct license instead of inserting a TODO comment."
+        ),
+    )
     parser.add_argument("--remove-header", action="store_true")
     parser.add_argument(
         "--use-current-year",
@@ -314,7 +322,7 @@ def process_files(  # pylint: disable=too-many-branches
             if license_header_index is not None:
                 break
         fuzzy_match_header_index = None
-        if args.fuzzy_match_generates_todo and license_header_index is None:
+        if (args.fuzzy_match_generates_todo or args.fuzzy_match_update) and license_header_index is None:
             for license_info in license_info_list:
                 fuzzy_match_header_index = fuzzy_find_license_header_index(
                     src_file_content=src_file_content,
@@ -354,7 +362,16 @@ def process_files(  # pylint: disable=too-many-branches
                     license_update_failed = True
         else:
             if fuzzy_match_header_index is not None:
-                if fuzzy_license_found(
+                if args.fuzzy_match_update:
+                    if fuzzy_license_replace(
+                        license_info=license_info,
+                        fuzzy_match_header_index=fuzzy_match_header_index,
+                        src_file_content=src_file_content,
+                        src_filepath=src_filepath,
+                        encoding=encoding,
+                    ):
+                        changed_files.append(src_filepath)
+                elif fuzzy_license_found(
                     license_info=license_info,
                     fuzzy_match_header_index=fuzzy_match_header_index,
                     fuzzy_match_todo_comment=args.fuzzy_match_todo_comment,
@@ -375,6 +392,26 @@ def process_files(  # pylint: disable=too-many-branches
                 ):
                     changed_files.append(src_filepath)
     return changed_files or todo_files or license_update_failed
+
+
+def _read_file_content(src_filepath):
+    last_error = None
+    for encoding in (
+        "utf8",
+        "ISO-8859-1",
+    ):  # we could use the chardet library to support more encodings
+        try:
+            with open(src_filepath, encoding=encoding, newline="") as src_file:
+                return src_file.readlines(), encoding
+        except UnicodeDecodeError as error:
+            last_error = error
+    print(
+        f"Error while processing: {src_filepath} - file encoding is probably not supported"
+    )
+    if last_error is not None:  # Avoid mypy message
+        raise last_error
+    raise RuntimeError("Unexpected branch taken (_read_file_content)")
+
 
 def get_commit_year(filepath: str) -> int | None:
     """Return the year of the most recent git commit that touched the file, or None on failure."""
@@ -413,25 +450,6 @@ def header_covers_year(
                 if start_year == year:
                     return True
     return False
-
-
-def _read_file_content(src_filepath):
-    last_error = None
-    for encoding in (
-        "utf8",
-        "ISO-8859-1",
-    ):  # we could use the chardet library to support more encodings
-        try:
-            with open(src_filepath, encoding=encoding, newline="") as src_file:
-                return src_file.readlines(), encoding
-        except UnicodeDecodeError as error:
-            last_error = error
-    print(
-        f"Error while processing: {src_filepath} - file encoding is probably not supported"
-    )
-    if last_error is not None:  # Avoid mypy message
-        raise last_error
-    raise RuntimeError("Unexpected branch taken (_read_file_content)")
 
 
 def license_not_found(  # pylint: disable=too-many-arguments
@@ -649,6 +667,133 @@ def fuzzy_license_found(
             + license_info.eol
         ]
         + src_file_content[fuzzy_match_header_index:]
+    )
+    with open(src_filepath, "w", encoding=encoding, newline="") as src_file:
+        src_file.write("".join(src_file_content))
+    return True
+
+
+def _find_fuzzy_block_range(src_file_content, license_info, fuzzy_match_header_index):
+    """Find the (start, end) line range of the fuzzy-matched comment block.
+
+    Returns (start_inclusive, end_exclusive) indices into src_file_content.
+    """
+    stripped_comment_start = (
+        license_info.comment_start.strip() if license_info.comment_start else ""
+    )
+    stripped_comment_end = (
+        license_info.comment_end.strip() if license_info.comment_end else ""
+    )
+    stripped_comment_prefix = (
+        license_info.comment_prefix.strip() if license_info.comment_prefix else ""
+    )
+
+    block_start = fuzzy_match_header_index
+    if stripped_comment_start and fuzzy_match_header_index > 0:
+        if src_file_content[fuzzy_match_header_index - 1].strip().startswith(
+            stripped_comment_start
+        ):
+            block_start = fuzzy_match_header_index - 1
+    # Scan backward: include preceding comment-prefixed lines and blank lines
+    # that are part of the old fuzzy-matched block, but stop at shebangs
+    # and encoding directives
+    while block_start > 0:
+        prev = src_file_content[block_start - 1].strip()
+        if prev.startswith("#!") or prev.startswith("# -*- coding"):
+            break
+        if prev and stripped_comment_prefix and prev.startswith(
+            stripped_comment_prefix
+        ):
+            block_start -= 1
+        elif not prev:
+            block_start -= 1
+        else:
+            break
+
+    i = fuzzy_match_header_index
+    while i < len(src_file_content):
+        stripped = src_file_content[i].strip()
+        if stripped_comment_end:
+            if stripped.startswith(stripped_comment_end):
+                i += 1
+                break
+        else:
+            if not stripped or not stripped.startswith(stripped_comment_prefix):
+                break
+        i += 1
+    block_end = i
+
+    if block_end < len(src_file_content) and not src_file_content[block_end].strip():
+        block_end += 1
+
+    return block_start, block_end
+
+
+def _extract_earliest_year(lines):
+    """Return the earliest 4-digit year found across all lines, or None."""
+    years = []
+    for line in lines:
+        for m in _YEAR_RANGE_PATTERN.finditer(line):
+            token = m.group(0)
+            start = int(token[:4])
+            end_str = token[4:].lstrip(" -,")
+            years.append(start)
+            if end_str:
+                years.append(int(end_str))
+    return min(years) if years else None
+
+
+def _patch_start_year_into_prefixed_license(prefixed_license, start_year):
+    """If start_year is earlier than the year in the first copyright line,
+    replace the single year with start_year-current_year range."""
+    current_year = datetime.now().year
+    if start_year >= current_year:
+        return prefixed_license
+    patched = list(prefixed_license)
+    for i, line in enumerate(patched):
+        matches = _YEAR_RANGE_PATTERN.findall(line)
+        if matches:
+            token = matches[-1]
+            year_in_line = int(token[:4])
+            end_str = token[4:].lstrip(" -,")
+            end_year = int(end_str) if end_str else year_in_line
+            if start_year < year_in_line:
+                replacement = f"{start_year}-{end_year}"
+                patched[i] = line.replace(token, replacement, 1)
+            return patched
+    return prefixed_license
+
+
+def fuzzy_license_replace(  # pylint: disable=too-many-arguments
+    license_info,
+    fuzzy_match_header_index,
+    src_file_content,
+    src_filepath,
+    encoding,
+):
+    """Replace fuzzy-matched license block with the correct license.
+
+    Preserves the earliest copyright year from the old block as the start
+    of the year range in the replacement.
+
+    Returns True if change was made.
+    """
+    block_start, block_end = _find_fuzzy_block_range(
+        src_file_content, license_info, fuzzy_match_header_index
+    )
+
+    old_block = src_file_content[block_start:block_end]
+    start_year = _extract_earliest_year(old_block)
+
+    replacement = license_info.prefixed_license
+    if start_year is not None:
+        replacement = _patch_start_year_into_prefixed_license(replacement, start_year)
+
+    src_file_content = (
+        src_file_content[:block_start]
+        + replacement
+        + [license_info.eol]
+        + src_file_content[block_end:]
     )
     with open(src_filepath, "w", encoding=encoding, newline="") as src_file:
         src_file.write("".join(src_file_content))

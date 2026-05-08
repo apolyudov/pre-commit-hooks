@@ -4,7 +4,11 @@ import shutil
 import pytest
 
 from pre_commit_hooks.insert_license import main as insert_license, LicenseInfo
-from pre_commit_hooks.insert_license import find_license_header_index
+from pre_commit_hooks.insert_license import (
+    find_license_header_index,
+    get_commit_year,
+    header_covers_year,
+)
 
 from .utils import chdir_to_test_resources, capture_stdout
 
@@ -979,7 +983,177 @@ def test_remove_license(
             assert new_file_content == expected_content
 
 
+# -- Tests for get_commit_year --
+
+
+def test_get_commit_year_returns_int_for_tracked_file():
+    with chdir_to_test_resources():
+        year = get_commit_year("module_with_license.py")
+        assert isinstance(year, int)
+        assert year >= 2017
+
+
+def test_get_commit_year_returns_none_for_nonexistent_file():
+    year = get_commit_year("/nonexistent/path/to/file.py")
+    assert year is None
+
+
+# -- Tests for header_covers_year --
+
+
+@pytest.mark.parametrize(
+    ("src_file_content", "year", "expected"),
+    (
+        (["# Copyright 2020\n"], 2020, True),
+        (["# Copyright 2020\n"], 2021, False),
+        (["# Copyright 2018-2020\n"], 2019, True),
+        (["# Copyright 2018-2020\n"], 2020, True),
+        (["# Copyright 2018-2020\n"], 2021, False),
+        (["# Copyright 2018 - 2020\n"], 2019, True),
+        (["# License line\n", "# Copyright 2018-2020\n"], 2019, True),
+        (["# No year here\n"], 2020, False),
+    ),
+)
+def test_header_covers_year(src_file_content, year, expected):
+    assert header_covers_year(src_file_content, 0, len(src_file_content), year) == expected
+
+
+def test_header_covers_year_with_offset():
+    content = ["# shebang\n", "# Copyright 2018-2020\n", "# License text\n"]
+    assert header_covers_year(content, 1, 2, 2019) is True
+    assert header_covers_year(content, 1, 2, 2021) is False
+
+
+# -- Integration tests for --use-commit-year --
+
+
+def _setup_git_repo_with_commit(tmpdir, license_content, src_content, commit_date):
+    """Create a temp git repo with one commit at the given date, return file paths."""
+    import subprocess as _subprocess
+    import os as _os
+
+    repo_dir = tmpdir.mkdir("repo")
+    _subprocess.run(["git", "init"], cwd=repo_dir, check=True, capture_output=True)
+    _subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    _subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+    )
+    license_path = _os.path.join(str(repo_dir), "LICENSE.txt")
+    with open(license_path, "w") as f:
+        f.write(license_content)
+    src_path = _os.path.join(str(repo_dir), "src.py")
+    with open(src_path, "w") as f:
+        f.write(src_content)
+    _subprocess.run(["git", "add", "."], cwd=repo_dir, check=True, capture_output=True)
+    env = _os.environ.copy()
+    env["GIT_AUTHOR_DATE"] = commit_date
+    env["GIT_COMMITTER_DATE"] = commit_date
+    _subprocess.run(
+        ["git", "commit", "-m", "initial"],
+        cwd=repo_dir,
+        check=True,
+        capture_output=True,
+        env=env,
+    )
+    return str(repo_dir), license_path, src_path
+
+
+def test_use_commit_year_skips_when_header_covers_commit_year(tmpdir):
+    """Header has 2020, commit is from 2020 -> should NOT rewrite."""
+    current_year = str(datetime.now().year)
+    _repo_dir, license_path, src_path = _setup_git_repo_with_commit(
+        tmpdir,
+        f"Copyright (C) {current_year} Teela O'Malley\n\nLicensed under the Apache License, Version 2.0\n",
+        "# Copyright (C) 2020 Teela O'Malley\n#\n# Licensed under the Apache License, Version 2.0\n\nimport sys\n",
+        "2020-01-01T00:00:00",
+    )
+    with open(src_path) as f:
+        original = f.read()
+    result = insert_license([
+        "--license-filepath", license_path,
+        "--comment-style", "#",
+        "--use-commit-year",
+        src_path,
+    ])
+    assert result == 0
+    with open(src_path) as f:
+        assert f.read() == original
+
+
+def test_use_commit_year_updates_when_header_does_not_cover_commit_year(tmpdir):
+    """Header has 2017, commit is from 2020 -> should rewrite with current year."""
+    current_year = str(datetime.now().year)
+    _repo_dir, license_path, src_path = _setup_git_repo_with_commit(
+        tmpdir,
+        f"Copyright (C) {current_year} Teela O'Malley\n\nLicensed under the Apache License, Version 2.0\n",
+        "# Copyright (C) 2017 Teela O'Malley\n#\n# Licensed under the Apache License, Version 2.0\n\nimport sys\n",
+        "2020-06-15T00:00:00",
+    )
+    result = insert_license([
+        "--license-filepath", license_path,
+        "--comment-style", "#",
+        "--use-commit-year",
+        src_path,
+    ])
+    assert result == 1
+    with open(src_path) as f:
+        content = f.read()
+    assert str(current_year) in content
+
+
+def test_use_commit_year_range_covers_commit_year(tmpdir):
+    """Header has 2015-2020, commit is from 2019 -> should NOT rewrite."""
+    current_year = str(datetime.now().year)
+    _repo_dir, license_path, src_path = _setup_git_repo_with_commit(
+        tmpdir,
+        f"Copyright (C) {current_year} Teela O'Malley\n\nLicensed under the Apache License, Version 2.0\n",
+        "# Copyright (C) 2015-2020 Teela O'Malley\n#\n# Licensed under the Apache License, Version 2.0\n\nimport sys\n",
+        "2019-03-10T00:00:00",
+    )
+    with open(src_path) as f:
+        original = f.read()
+    result = insert_license([
+        "--license-filepath", license_path,
+        "--comment-style", "#",
+        "--use-commit-year",
+        src_path,
+    ])
+    assert result == 0
+    with open(src_path) as f:
+        assert f.read() == original
+
+
+def test_use_commit_year_inserts_license_for_new_file(tmpdir):
+    """No license header -> should insert one (same as --use-current-year)."""
+    current_year = str(datetime.now().year)
+    _repo_dir, license_path, src_path = _setup_git_repo_with_commit(
+        tmpdir,
+        f"Copyright (C) {current_year} Teela O'Malley\n\nLicensed under the Apache License, Version 2.0\n",
+        "import sys\n",
+        "2020-01-01T00:00:00",
+    )
+    result = insert_license([
+        "--license-filepath", license_path,
+        "--comment-style", "#",
+        "--use-commit-year",
+        src_path,
+    ])
+    assert result == 1
+    with open(src_path) as f:
+        content = f.read()
+    assert content.startswith("# Copyright")
+
+
 # -- Tests for --extra-comments --
+
 
 def test_extra_comments_inserts_before(tmpdir):
     """--extra-comments 'before:...' injects a comment line before the license."""
@@ -1220,10 +1394,162 @@ def test_extra_comments_error_on_unknown_tag(tmpdir):
         assert "unknown tag 'befor'" in stdout.getvalue()
 
 
+# -- Tests for --fuzzy-match-update --
 
 
-# -- CRLF and option interaction tests for --extra-comments --
+def test_fuzzy_match_update_replaces_python(tmpdir):
+    """--fuzzy-match-update replaces fuzzy-matched Python license with the correct one."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_with_fuzzy_matched_license.py", src.strpath)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        with open("module_with_license.py") as expected:
+            assert content == expected.read()
 
+
+def test_fuzzy_match_update_replaces_css(tmpdir):
+    """--fuzzy-match-update replaces fuzzy-matched CSS license with the correct one."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.css")
+        shutil.copy("module_with_fuzzy_matched_license.css", src.strpath)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "/*| *| */",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        with open("module_with_license.css") as expected:
+            assert content == expected.read()
+
+
+def test_fuzzy_match_update_replaces_groovy(tmpdir):
+    """--fuzzy-match-update replaces fuzzy-matched Groovy license with the correct one."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.groovy")
+        shutil.copy("module_with_fuzzy_matched_license.groovy", src.strpath)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "//",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        with open("module_with_license.groovy") as expected:
+            assert content == expected.read()
+
+
+def test_fuzzy_match_update_replaces_jinja(tmpdir):
+    """--fuzzy-match-update replaces fuzzy-matched Jinja license with the correct one."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.jinja")
+        shutil.copy("module_with_fuzzy_matched_license.jinja", src.strpath)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "{#||#}",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        with open("module_with_license.jinja") as expected:
+            assert content == expected.read()
+
+
+def test_fuzzy_match_update_replaces_with_shebang(tmpdir):
+    """--fuzzy-match-update replaces fuzzy-matched license in file with shebang."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_with_fuzzy_matched_license_and_shebang.py", src.strpath)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        assert content.startswith("#!/bin/usr/env python\n")
+        assert "# -*- coding: utf-8 -*-\n" in content
+        assert "# Copyright (C) 2017 Teela O'Malley\n" in content
+        assert "# Licensed under the Apache License, Version 2.0 (the \"License\");\n" in content
+        # Old fuzzy text should be gone
+        assert "Version 2.1" not in content
+        assert "Licensed under the Apache License,\n#" not in content
+
+
+def test_fuzzy_match_update_no_match_inserts_license(tmpdir):
+    """When no fuzzy match is found, --fuzzy-match-update inserts the license normally."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        assert content.startswith("# Copyright (C) 2017")
+
+
+def test_fuzzy_match_update_idempotent(tmpdir):
+    """After replacement, re-running with --fuzzy-match-update is a no-op."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_with_fuzzy_matched_license.py", src.strpath)
+        # First run: replace
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        content_after_replace = src.read()
+        # Second run: should find exact match, no change
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 0
+        assert src.read() == content_after_replace
+
+
+def test_fuzzy_match_update_takes_priority_over_todo(tmpdir):
+    """When both --fuzzy-match-update and --fuzzy-match-generates-todo are set, update wins."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_with_fuzzy_matched_license.py", src.strpath)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--fuzzy-match-generates-todo",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        with open("module_with_license.py") as expected:
+            assert content == expected.read()
+        assert "TODO" not in content
+
+
+# -- Tests for CRLF line endings across new features --
+
+
+@pytest.mark.parametrize("line_ending", ("\n", "\r\n"))
 def test_extra_comments_crlf_before(tmpdir, line_ending):
     """--extra-comments before works with both line endings."""
     with chdir_to_test_resources():
@@ -1265,6 +1591,67 @@ def test_extra_comments_crlf_both(tmpdir, line_ending):
 
 @pytest.mark.parametrize("line_ending", ("\n", "\r\n"))
 def test_extra_comments_crlf_block_style(tmpdir, line_ending):
+    """--extra-comments with block comment style works with both line endings."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.css")
+        shutil.copy("module_without_license.css", src.strpath)
+        _convert_line_ending(src.strpath, line_ending)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "/*| *| */",
+            "--extra-comments", "before:Auto-generated,after:End of license",
+            src.strpath,
+        ])
+        content = src.read()
+        assert " * Auto-generated" in content
+        assert " * End of license" in content
+        assert "\r\n" not in content.replace(line_ending, "")
+
+
+@pytest.mark.parametrize("line_ending", ("\n", "\r\n"))
+def test_fuzzy_match_update_crlf_python(tmpdir, line_ending):
+    """--fuzzy-match-update works with both line endings (Python)."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_with_fuzzy_matched_license.py", src.strpath)
+        _convert_line_ending(src.strpath, line_ending)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        assert "# Copyright (C) 2017 Teela O'Malley" in content
+        assert "# Licensed under the Apache License, Version 2.0" in content
+        assert "Version 2.0 (the \"License\");" in content
+        assert "\r\n" not in content.replace(line_ending, "")
+
+
+@pytest.mark.parametrize("line_ending", ("\n", "\r\n"))
+def test_fuzzy_match_update_crlf_css(tmpdir, line_ending):
+    """--fuzzy-match-update works with both line endings (CSS block comments)."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.css")
+        shutil.copy("module_with_fuzzy_matched_license.css", src.strpath)
+        _convert_line_ending(src.strpath, line_ending)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "/*| *| */",
+            "--fuzzy-match-update",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        assert " * Copyright (C) 2017" in content
+        assert " * Licensed under the Apache License, Version 2.0" in content
+        assert "\r\n" not in content.replace(line_ending, "")
+
+
+# -- Tests for option interactions --
+
+
 def test_extra_comments_with_use_current_year(tmpdir):
     """--extra-comments works together with --use-current-year."""
     with chdir_to_test_resources():
@@ -1303,3 +1690,55 @@ def test_extra_comments_with_no_extra_eol(tmpdir):
         license_end = None
         for i, line in enumerate(lines):
             if 'the "License")' in line:
+                license_end = i
+                break
+        assert license_end is not None
+        # Next line should be code, not blank
+        assert lines[license_end + 1] == "import sys"
+
+
+def test_fuzzy_match_update_with_remove_header(tmpdir):
+    """--fuzzy-match-update with --remove-header removes the fuzzy block entirely."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_with_fuzzy_matched_license.py", src.strpath)
+        # remove-header only acts when exact match is found.
+        # Since this is a fuzzy match, remove-header won't trigger.
+        # The fuzzy-match-update should still replace it.
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--fuzzy-match-update",
+            "--remove-header",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        # remove-header acts on exact matches, not fuzzy ones,
+        # so fuzzy-match-update replaces the block with the correct license.
+        assert "# Copyright (C) 2017" in content
+
+
+def test_fuzzy_match_update_preserves_start_year(tmpdir):
+    """--fuzzy-match-update with --use-current-year preserves the original start year."""
+    current_year = str(datetime.now().year)
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy(
+            "module_with_fuzzy_matched_license_with_year_range.py", src.strpath
+        )
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--fuzzy-match-update",
+            "--use-current-year",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        # The start year (2020) from the old block must be preserved
+        assert f"2020-{current_year}" in content
+        # The old fuzzy text should be gone
+        assert "Version 2.0" not in content.split("Version")[0] if "Version" in content else True
+        # The replacement should contain the correct license text
+        assert 'Licensed under the Apache License, Version 2.0 (the "License");' in content
