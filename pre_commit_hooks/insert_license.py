@@ -45,6 +45,37 @@ class LicenseUpdateError(Exception):
         self.message = message
 
 
+def _parse_extra_comments(expr):
+    """Parse --extra-comments expression into before/after line lists.
+
+    Format: tag:line[,tag:line] where tag is "before" or "after".
+    Only the first colon in each part separates tag from line text.
+    Raises LicenseUpdateError on malformed input.
+    """
+    before, after = [], []
+    if not expr:
+        return before, after
+    for part in expr.split(","):
+        if ":" not in part:
+            raise LicenseUpdateError(
+                f"Error in --extra-comments: '{part}' is missing ':' separator. "
+                f"Expected format: tag:line where tag is 'before' or 'after'."
+            )
+        colon_idx = part.index(":")
+        tag = part[:colon_idx]
+        line = part[colon_idx + 1 :]
+        if tag == "before":
+            before.append(line)
+        elif tag == "after":
+            after.append(line)
+        else:
+            raise LicenseUpdateError(
+                f"Error in --extra-comments: unknown tag '{tag}' in '{part}'. "
+                f"Valid tags are 'before' and 'after'."
+            )
+    return before, after
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("filenames", nargs="*", help="filenames to check")
@@ -91,6 +122,15 @@ def main(argv=None) -> int:
         default="",
         help="Insert license after line matching regex (ex: '^<\\?php$')",
     )
+    parser.add_argument(
+        "--extra-comments",
+        default="",
+        help=(
+            "Extra comment lines to inject around the license. "
+            "Format: tag:line[,tag:line] where tag is 'before' or 'after'. "
+            "E.g.: --extra-comments='before:Auto-generated,after:Do not edit'"
+        ),
+    )
     parser.add_argument("--remove-header", action="store_true")
     parser.add_argument(
         "--use-current-year",
@@ -125,7 +165,11 @@ def main(argv=None) -> int:
     if not args.license_filepath:
         args.license_filepath = [DEFAULT_LICENSE_FILEPATH]
 
-    license_info_list = get_license_info_list(args)
+    try:
+        license_info_list = get_license_info_list(args)
+    except LicenseUpdateError as error:
+        print(error.message)
+        return 2
 
     changed_files: list[str] = []
     todo_files: list[str] = []
@@ -176,6 +220,23 @@ def get_license_info_list(args) -> list[LicenseInfo]:
         if args.use_current_year:
             plain_license = _replace_year_in_license_with_current(
                 plain_license, args.license_filepath
+            )
+
+        if args.extra_comments:
+            before_lines, after_lines = _parse_extra_comments(args.extra_comments)
+            license_eol = (
+                "\r\n"
+                if plain_license and plain_license[0].endswith("\r\n")
+                else "\n"
+            )
+            if after_lines and plain_license and not plain_license[-1].endswith(
+                license_eol
+            ):
+                plain_license[-1] += license_eol
+            plain_license = (
+                [line + license_eol for line in before_lines]
+                + plain_license
+                + [line + license_eol for line in after_lines]
             )
 
         prefixed_license = [

@@ -977,3 +977,329 @@ def test_remove_license(
                 expected_content = expected_content_file.read()
             new_file_content = path.open(encoding="utf-8").read()
             assert new_file_content == expected_content
+
+
+# -- Tests for --extra-comments --
+
+def test_extra_comments_inserts_before(tmpdir):
+    """--extra-comments 'before:...' injects a comment line before the license."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Auto-generated file",
+            src.strpath,
+        ])
+        content = src.read()
+        assert content.startswith("# Auto-generated file\n")
+        assert "# Copyright (C) 2017" in content
+
+
+def test_extra_comments_inserts_after(tmpdir):
+    """--extra-comments 'after:...' injects a comment line after the license."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "after:Do not edit",
+            src.strpath,
+        ])
+        content = src.read()
+        assert "# Do not edit\n" in content
+        # The after line should appear after the license block
+        after_idx = content.index("# Do not edit")
+        license_idx = content.index("# Licensed under")
+        assert after_idx > license_idx
+
+
+def test_extra_comments_after_on_newline_without_trailing_newline(tmpdir):
+    """After-comment starts on its own line even when license file lacks trailing newline."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_without_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "after:Do not edit",
+            src.strpath,
+        ])
+        content = src.read()
+        # The after line must be on its own line, not appended to the last license line
+        assert "\n# Do not edit\n" in content
+        assert '";Do not edit' not in content  # not glued to end of "License);"
+
+
+def test_extra_comments_inserts_both(tmpdir):
+    """--extra-comments with both before and after injects lines on both sides."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Header line,after:Footer line",
+            src.strpath,
+        ])
+        content = src.read()
+        assert content.startswith("# Header line\n")
+        assert "# Footer line\n" in content
+        header_idx = content.index("# Header line")
+        footer_idx = content.index("# Footer line")
+        copyright_idx = content.index("# Copyright")
+        assert header_idx < copyright_idx < footer_idx
+
+
+def test_extra_comments_with_block_comment_style(tmpdir):
+    """--extra-comments works with block comment styles (e.g. /*| *| */)."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.css")
+        shutil.copy("module_without_license.css", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "/*| *| */",
+            "--extra-comments", "before:Auto-generated,after:End of license",
+            src.strpath,
+        ])
+        content = src.read()
+        assert content.startswith("/*\n")
+        assert " * Auto-generated\n" in content
+        assert " * End of license\n" in content
+        assert " */\n" in content
+
+
+def test_extra_comments_detects_existing_license_with_extras(tmpdir):
+    """When license with matching extra comments is already present, no change."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        # First insert
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Auto-generated",
+            src.strpath,
+        ])
+        content_after_first = src.read()
+        # Second run should detect the license (including the extra comment)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Auto-generated",
+            src.strpath,
+        ])
+        assert result == 0
+        assert src.read() == content_after_first
+
+
+def test_extra_comments_no_extra_comments(tmpdir):
+    """Empty --extra-comments should behave like the option was not given."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        assert content.startswith("# Copyright (C) 2017")
+
+
+def test_extra_comments_multiple_before(tmpdir):
+    """Multiple 'before' comments are inserted in order before the license."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Line A,before:Line B",
+            src.strpath,
+        ])
+        content = src.read()
+        a_idx = content.index("# Line A")
+        b_idx = content.index("# Line B")
+        copyright_idx = content.index("# Copyright")
+        assert a_idx < b_idx < copyright_idx
+
+
+def test_extra_comments_colon_in_text(tmpdir):
+    """Colons in the comment text are preserved (only first colon is the delimiter)."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:See: http://example.com",
+            src.strpath,
+        ])
+        content = src.read()
+        assert "# See: http://example.com\n" in content
+
+
+def test_extra_comments_remove_header(tmpdir):
+    """--remove-header removes the full block including extra comments."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        # First insert with extra comments
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Auto-generated,after:Do not edit",
+            src.strpath,
+        ])
+        assert "Auto-generated" in src.read()
+        # Now remove
+        result = insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Auto-generated,after:Do not edit",
+            "--remove-header",
+            src.strpath,
+        ])
+        assert result == 1
+        content = src.read()
+        assert "Auto-generated" not in content
+        assert "Copyright" not in content
+        assert "Do not edit" not in content
+
+
+def test_extra_comments_no_space_in_comment_prefix(tmpdir):
+    """--extra-comments respects --no-space-in-comment-prefix."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--no-space-in-comment-prefix",
+            "--extra-comments", "before:Auto-generated",
+            src.strpath,
+        ])
+        content = src.read()
+        assert "#Auto-generated\n" in content
+
+
+def test_extra_comments_error_on_missing_colon(tmpdir):
+    """--extra-comments with no colon in a part returns config error (2)."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        with capture_stdout() as stdout:
+            result = insert_license([
+                "--license-filepath", "LICENSE_with_trailing_newline.txt",
+                "--comment-style", "#",
+                "--extra-comments", "before",
+                src.strpath,
+            ])
+        assert result == 2
+        assert "missing ':' separator" in stdout.getvalue()
+
+
+def test_extra_comments_error_on_unknown_tag(tmpdir):
+    """--extra-comments with an unknown tag returns config error (2)."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        with capture_stdout() as stdout:
+            result = insert_license([
+                "--license-filepath", "LICENSE_with_trailing_newline.txt",
+                "--comment-style", "#",
+                "--extra-comments", "befor:Auto-generated",
+                src.strpath,
+            ])
+        assert result == 2
+        assert "unknown tag 'befor'" in stdout.getvalue()
+
+
+
+
+# -- CRLF and option interaction tests for --extra-comments --
+
+def test_extra_comments_crlf_before(tmpdir, line_ending):
+    """--extra-comments before works with both line endings."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        _convert_line_ending(src.strpath, line_ending)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Auto-generated",
+            src.strpath,
+        ])
+        content = src.read()
+        assert content.startswith("# Auto-generated")
+        assert "# Copyright (C) 2017" in content
+        # Verify consistent line endings
+        assert "\r\n" not in content.replace(line_ending, "")
+
+
+@pytest.mark.parametrize("line_ending", ("\n", "\r\n"))
+def test_extra_comments_crlf_both(tmpdir, line_ending):
+    """--extra-comments before+after works with both line endings."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        _convert_line_ending(src.strpath, line_ending)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Header,after:Footer",
+            src.strpath,
+        ])
+        content = src.read()
+        assert "# Header" in content
+        assert "# Footer" in content
+        assert "# Copyright (C) 2017" in content
+        assert "\r\n" not in content.replace(line_ending, "")
+
+
+@pytest.mark.parametrize("line_ending", ("\n", "\r\n"))
+def test_extra_comments_crlf_block_style(tmpdir, line_ending):
+def test_extra_comments_with_use_current_year(tmpdir):
+    """--extra-comments works together with --use-current-year."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Auto-generated",
+            "--use-current-year",
+            src.strpath,
+        ])
+        content = src.read()
+        assert content.startswith("# Auto-generated\n")
+        current_year = str(datetime.now().year)
+        assert current_year in content
+
+
+def test_extra_comments_with_no_extra_eol(tmpdir):
+    """--extra-comments works together with --no-extra-eol."""
+    with chdir_to_test_resources():
+        src = tmpdir.join("test.py")
+        shutil.copy("module_without_license.py", src.strpath)
+        insert_license([
+            "--license-filepath", "LICENSE_with_trailing_newline.txt",
+            "--comment-style", "#",
+            "--extra-comments", "before:Auto-generated",
+            "--no-extra-eol",
+            src.strpath,
+        ])
+        content = src.read()
+        assert "# Auto-generated" in content
+        # With --no-extra-eol there should be no blank separator between license and code
+        lines = content.split("\n")
+        # Find the last license line (ends with "License);")
+        license_end = None
+        for i, line in enumerate(lines):
+            if 'the "License")' in line:

@@ -19,6 +19,7 @@ this issue: [#83](https://github.com/Lucas-C/pre-commit-hooks/issues/83)
     - [Handling years flexibly](#handling-years-flexibly)
     - [Using the commit year](#using-the-commit-year)
     - [No extra EOL](#no-extra-eol)
+    - [Extra comments](#extra-comments)
     - [Fuzzy license matching](#fuzzy-license-matching)
     - [Multiple license files](#multiple-license-files)
 - [Handy shell functions](#handy-shell-functions)
@@ -147,6 +148,35 @@ regular `--use-current-year` behavior.
 The `--no-extra-eol` argument prevents the insertion of an additional
 End-of-Line (EOL) character at the end of the license header; see
 [issue #70](https://github.com/Lucas-C/pre-commit-hooks/issues/70).
+
+#### Extra comments
+
+You can use `--extra-comments` to inject additional comment lines before or
+after the license text. The comments are treated as part of the license block,
+so they are included in matching, insertion, and removal.
+
+The format is a comma-separated list of `tag:line` pairs, where `tag` is either
+`before` or `after`:
+
+```
+--extra-comments "before:Auto-generated file,after:Do not edit"
+```
+
+This would produce a header like:
+
+```python
+# Auto-generated file
+# Copyright (C) 2024 Acme Corp.
+#
+# Licensed under ...
+# Do not edit
+```
+
+Multiple `before` or `after` entries are supported:
+
+```
+--extra-comments "before:Line 1,before:Line 2,after:Footer"
+```
 
 #### Fuzzy license matching
 
