@@ -17,6 +17,7 @@ this issue: [#83](https://github.com/Lucas-C/pre-commit-hooks/issues/83)
     - [How to specify in how many lines to search for the license header in each file](#how-to-specify-in-how-many-lines-to-search-for-the-license-header-in-each-file)
     - [Removing old license and replacing it with a new one](#removing-old-license-and-replacing-it-with-a-new-one)
     - [Handling years flexibly](#handling-years-flexibly)
+    - [Using the commit year](#using-the-commit-year)
     - [No extra EOL](#no-extra-eol)
     - [Fuzzy license matching](#fuzzy-license-matching)
     - [Multiple license files](#multiple-license-files)
@@ -123,6 +124,23 @@ headers:
 You can also use `--allow-past-years` to allow stale years to be unchanged.
 Using both `--allow-past-years` and `--use-current-year` issues a year
 range as described above.
+
+#### Using the commit year
+
+You can add `--use-commit-year` to make the hook aware of the file's git
+history. This option implies `--use-current-year` (and therefore
+`--allow-past-years`) but adds an additional rule: if the existing license
+header already contains the year of the most recent git commit that touched
+the file -- either as a single year or within a range -- the header will
+not be rewritten.
+
+For example, if a file was last modified in a 2023 commit and its header
+contains `2015-2023`, the hook will leave it untouched. But if the header
+only contains `2015-2020`, the hook will update it to `2015-2026` (assuming
+the current year is 2026).
+
+If a file has no git history (e.g. untracked), the hook falls back to the
+regular `--use-current-year` behavior.
 
 #### No extra EOL
 

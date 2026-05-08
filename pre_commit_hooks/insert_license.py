@@ -1,7 +1,9 @@
 from __future__ import annotations
 import argparse
 import collections
+import os
 import re
+import subprocess
 import sys
 from datetime import datetime
 from typing import Any, Sequence, Final
@@ -104,8 +106,21 @@ def main(argv=None) -> int:
             "Allow past years in headers. License comments are not updated if they contain past years."
         ),
     )
+    parser.add_argument(
+        "--use-commit-year",
+        action="store_true",
+        help=(
+            "Use the current year in inserted and updated licenses,"
+            " but skip files whose license header already covers the year"
+            " of the most recent git commit for that file."
+            " Implies --use-current-year."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.use_current_year:
+        args.allow_past_years = True
+    if args.use_commit_year:
+        args.use_current_year = True
         args.allow_past_years = True
     if not args.license_filepath:
         args.license_filepath = [DEFAULT_LICENSE_FILEPATH]
@@ -250,20 +265,32 @@ def process_files(  # pylint: disable=too-many-branches
                 if fuzzy_match_header_index is not None:
                     break
         if license_header_index is not None:
-            try:
-                if license_found(
-                    remove_header=args.remove_header,
-                    update_year_range=args.use_current_year,
-                    license_header_index=license_header_index,
-                    license_info=license_info,
+            commit_year_skip = False
+            if args.use_commit_year and not args.remove_header:
+                commit_year = get_commit_year(src_filepath)
+                if commit_year is None:
+                    commit_year = datetime.now().year
+                commit_year_skip = header_covers_year(
                     src_file_content=src_file_content,
-                    src_filepath=src_filepath,
-                    encoding=encoding,
-                ):
-                    changed_files.append(src_filepath)
-            except LicenseUpdateError as error:
-                print(error)
-                license_update_failed = True
+                    license_header_index=license_header_index,
+                    license_length=len(license_info.prefixed_license),
+                    year=commit_year,
+                )
+            if not commit_year_skip:
+                try:
+                    if license_found(
+                        remove_header=args.remove_header,
+                        update_year_range=args.use_current_year,
+                        license_header_index=license_header_index,
+                        license_info=license_info,
+                        src_file_content=src_file_content,
+                        src_filepath=src_filepath,
+                        encoding=encoding,
+                    ):
+                        changed_files.append(src_filepath)
+                except LicenseUpdateError as error:
+                    print(error)
+                    license_update_failed = True
         else:
             if fuzzy_match_header_index is not None:
                 if fuzzy_license_found(
@@ -287,6 +314,44 @@ def process_files(  # pylint: disable=too-many-branches
                 ):
                     changed_files.append(src_filepath)
     return changed_files or todo_files or license_update_failed
+
+def get_commit_year(filepath: str) -> int | None:
+    """Return the year of the most recent git commit that touched the file, or None on failure."""
+    try:
+        result = subprocess.run(
+            ["git", "log", "-1", "--format=%cd", "--date=format:%Y", "--", filepath],
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=os.path.dirname(os.path.abspath(filepath)),
+        )
+        return int(result.stdout.strip())
+    except (subprocess.CalledProcessError, ValueError, FileNotFoundError, OSError):
+        return None
+
+
+def header_covers_year(
+    src_file_content: list[str],
+    license_header_index: int,
+    license_length: int,
+    year: int,
+) -> bool:
+    """Check whether the license header already contains the given year (single or in range)."""
+    for i in range(license_header_index, license_header_index + license_length):
+        if i >= len(src_file_content):
+            break
+        matches = _YEAR_RANGE_PATTERN.findall(src_file_content[i])
+        for match in matches:
+            start_year = int(match[:4])
+            end_year_str = match[4:].lstrip(" -,")
+            if end_year_str:
+                end_year = int(end_year_str)
+                if start_year <= year <= end_year:
+                    return True
+            else:
+                if start_year == year:
+                    return True
+    return False
 
 
 def _read_file_content(src_filepath):
